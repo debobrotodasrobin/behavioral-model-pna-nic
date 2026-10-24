@@ -55,6 +55,43 @@ class PnaNicHandler : virtual public PnaNicIf {
     return static_cast<int64_t>(nic_->get_time_since_epoch_us());
   }
 
+  // Mirror session control plane backing the mirror_packet() extern function.
+  // Returns 1 on success, 0 on failure.
+  int32_t mirroring_session_add(const int32_t session_id,
+                                const int32_t egress_port) {
+    bm::Logger::get()->trace("mirroring_session_add");
+    PnaNic::MirroringSessionConfig config;
+    config.egress_port = static_cast<bm::port_t>(egress_port);
+    return nic_->mirroring_session_add(static_cast<int>(session_id), config) ? 1 : 0;
+  }
+
+  int32_t mirroring_session_delete(const int32_t session_id) {
+    bm::Logger::get()->trace("mirroring_session_delete");
+    return nic_->mirroring_session_delete(static_cast<int>(session_id)) ? 1 : 0;
+  }
+
+  // Returns the configured egress port, or -1 when the session is unknown.
+  int32_t mirroring_session_get_egress_port(const int32_t session_id) {
+    bm::Logger::get()->trace("mirroring_session_get_egress_port");
+    PnaNic::MirroringSessionConfig config;
+    if (!nic_->mirroring_session_get(static_cast<int>(session_id), &config))
+      return -1;
+    return static_cast<int32_t>(config.egress_port);
+  }
+
+  // Port classification for the is_host_port() / is_net_port() externs. See
+  // the declaration of port_class_set() in pna_nic.h for the default applied to
+  // a port that has never been configured.
+  void set_port_class(const int32_t port, const bool is_host) {
+    bm::Logger::get()->trace("set_port_class");
+    port_class_set(static_cast<bm::port_t>(port), is_host);
+  }
+
+  int32_t get_port_class(const int32_t port) {
+    bm::Logger::get()->trace("get_port_class");
+    return port_class_is_host(static_cast<bm::port_t>(port)) ? 1 : 0;
+  }
+
  private:
   PnaNic *nic_;
 };

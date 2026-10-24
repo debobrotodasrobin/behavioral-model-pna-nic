@@ -49,6 +49,19 @@ enum class MatchTableType {
   INDIRECT_WS
 };
 
+//! Register a translation applied to a direct meter's colour before it is
+//! written into the table's result_target field. Defaults to identity.
+//!
+//! bmv2 encodes meter colours as GREEN=0, YELLOW=1, RED=2, which matches the
+//! v1model architecture. PSA and PNA number the same colours RED=0, GREEN=1,
+//! YELLOW=2. An indirect meter extern translates between the two at its own
+//! boundary, but a direct meter's colour is written straight into result_target
+//! by MatchTableAbstract::apply_action with no target hook in between, so the
+//! target registers that same translation once, at startup. Targets that never
+//! call this (v1model, whose enumeration already matches bmv2) are unaffected.
+using direct_meter_color_fn = Meter::color_t (*)(Meter::color_t);
+void set_direct_meter_color_translation(direct_meter_color_fn fn);
+
 class MatchTableAbstract : public NamedP4Object {
  public:
   friend class handle_iterator;

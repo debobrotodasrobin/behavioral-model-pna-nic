@@ -21,28 +21,42 @@
 
 #include "pna_counter.h"
 
+#include <bm/bm_sim/logger.h>
+
 namespace bm {
 
 namespace pna {
 
 void
 PNA_Counter::count(const Data &index) {
-  _counter->get_counter(
-      index.get<size_t>()).increment_counter(get_packet());
+  if (_counter == nullptr) return;  // see init()
+  const size_t idx = index.get<size_t>();
+  // an out-of-range index would assert inside CounterArray; report and skip
+  // instead, so one bad data-plane index cannot take the whole NIC down
+  if (idx >= _counter->size()) {
+    BMLOG_ERROR_PKT(get_packet(),
+                    "Counter '{}' index {} out of range (size {}); not counted",
+                    get_name(), idx, _counter->size());
+    return;
+  }
+  _counter->get_counter(idx).increment_counter(get_packet());
 }
 
 Counter &
 PNA_Counter::get_counter(size_t idx) {
+  assert(_counter != nullptr && "counter not registered in config");
   return _counter->get_counter(idx);
 }
 
 const Counter &
 PNA_Counter::get_counter(size_t idx) const {
+  assert(_counter != nullptr && "counter not registered in config");
   return _counter->get_counter(idx);
 }
 
 Counter::CounterErrorCode
 PNA_Counter::reset_counters(){
+  if (_counter == nullptr) return Counter::CounterErrorCode::SUCCESS;
   return _counter->reset_counters();
 }
 

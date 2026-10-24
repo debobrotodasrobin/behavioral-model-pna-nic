@@ -28,6 +28,7 @@
 #include <fstream>
 #include <string>
 
+#include <bm/bm_sim/learning.h>
 #include "pna_nic.h"
 
 extern int import_primitives();
@@ -106,6 +107,15 @@ PnaNic::receive_(port_t port_num, const char *buffer, int len) {
   // each add_header / remove_header primitive call
   packet->set_register(PACKET_LENGTH_REG_IDX, len);
 
+  // clear the drop flag; the packet is forwarded unless drop_packet() sets it
+  // again during the main control pass
+  packet->set_register(PACKET_DROP_FLAG_REG_IDX, 0);
+
+  // No mirroring and no digest unless the main control pass asks for them.
+  // Both live in register 2, and a packet fresh off the wire has neither, so
+  // clearing the whole register (rather than one field of it) is what we want.
+  packet->set_register(PACKET_MIRROR_AND_DIGEST_REG_IDX, 0);
+
   input_buffer.push_front(std::move(packet));
   return 0;
 }
@@ -144,6 +154,63 @@ PnaNic::get_time_since_epoch_us() const {
 void
 PnaNic::set_transmit_fn(TransmitFn fn) {
   my_transmit_fn = std::move(fn);
+}
+
+// See the declaration in pna_nic.h for why this table is namespace scope and
+// why an unconfigured port counts as a network port.
+namespace {
+
+std::mutex port_class_mutex;
+std::unordered_set<port_t> host_ports;
+
+}  // namespace
+
+bool
+port_class_set(port_t port, bool is_host) {
+  std::lock_guard<std::mutex> lock(port_class_mutex);
+  if (is_host) {
+    host_ports.insert(port);
+  } else {
+    host_ports.erase(port);
+  }
+  return true;
+}
+
+bool
+port_class_is_host(port_t port) {
+  std::lock_guard<std::mutex> lock(port_class_mutex);
+  return host_ports.find(port) != host_ports.end();
+}
+
+bool
+PnaNic::mirroring_session_add(int session_id,
+                              const MirroringSessionConfig &config) {
+  if (session_id < 0 ||
+      static_cast<uint64_t>(session_id) > MIRROR_SESSION_ID_MAX) {
+    bm::Logger::get()->error(
+        "mirror session id {} out of range (0..{}); session not added",
+        session_id, MIRROR_SESSION_ID_MAX);
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mirror_sessions_mutex);
+  mirror_sessions[session_id] = config;
+  return true;
+}
+
+bool
+PnaNic::mirroring_session_delete(int session_id) {
+  std::lock_guard<std::mutex> lock(mirror_sessions_mutex);
+  return mirror_sessions.erase(session_id) == 1;
+}
+
+bool
+PnaNic::mirroring_session_get(int session_id,
+                              MirroringSessionConfig *config) const {
+  std::lock_guard<std::mutex> lock(mirror_sessions_mutex);
+  auto it = mirror_sessions.find(session_id);
+  if (it == mirror_sessions.end()) return false;
+  if (config != nullptr) *config = it->second;
+  return true;
 }
 
 void
@@ -202,8 +269,79 @@ PnaNic::main_thread() {
     main_mau->apply(packet.get());
     packet->reset_exit();
 
+    // Digest<T>::pack() leaves the field list it wants reported in the mirror
+    // register. Emitting it here, before the drop and recirculate handling,
+    // matches what pack() promises: the digest reaches the control plane
+    // whatever becomes of the packet. It also has to precede recirculate(),
+    // which resets the PHV, because a digest is a set of PHV fields.
+    const int digest_field_list_id = packet_digest_field_list(packet.get());
+    if (digest_field_list_id >= 0) {
+      BMLOG_DEBUG_PKT(*packet, "Generating digest for field list {}",
+                      digest_field_list_id);
+      get_learn_engine()->learn(digest_field_list_id, *packet);
+    }
+
+    // drop_packet() was called: per the PNA specification the packet is
+    // dropped once the main control has finished executing, so it is neither
+    // deparsed nor transmitted.
+    if (packet->get_register(PACKET_DROP_FLAG_REG_IDX) != 0) {
+      BMLOG_DEBUG_PKT(*packet, "Dropping packet");
+      continue;
+    }
+
     Deparser *deparser = this->get_deparser("main_deparser");
     deparser->deparse(packet.get());
+
+    // recirculate() asks for a second pass through the main parser rather than
+    // a trip out to the wire. Handling it here, after the deparser, is what
+    // makes that well defined: deparse() has just prepended the headers to the
+    // buffer, so data() now points at the complete frame and the parser will
+    // read the same bytes a peer NIC would have seen. This is the same ordering
+    // psa_switch uses when it loops a packet back after its egress deparser.
+    if (packet->get_register(PACKET_RECIRCULATE_FLAG_REG_IDX) != 0) {
+      // clear it before the packet goes back round, or the second pass would
+      // recirculate forever
+      packet->set_register(PACKET_RECIRCULATE_FLAG_REG_IDX, 0);
+      // the frame carries no record of which port it came in on, and the PNA
+      // model reports that port unchanged across a recirculation, so it is
+      // carried across the PHV reset by hand
+      const uint64_t recirc_input_port =
+          phv->get_field("pna_main_parser_input_metadata.input_port").get_uint();
+      BMLOG_DEBUG_PKT(*packet, "Recirculating packet (input port {})",
+                      recirc_input_port);
+      phv->reset();
+      phv->reset_header_stacks();
+      phv->reset_metadata();
+      phv->get_field("pna_main_parser_input_metadata.recirculated").set(1);
+      phv->get_field("pna_main_parser_input_metadata.input_port").
+          set(recirc_input_port);
+      input_buffer.push_front(std::move(packet));
+      continue;
+    }
+
+    // mirror_packet() records a session here; the copy is made after the
+    // deparser so that the mirrored frame is exactly the frame that leaves the
+    // NIC (cloning before the deparser would require re-parsing the copy, the
+    // way simple_switch does it for its ingress clones).
+    const int session_id = packet_mirror_session(packet.get());
+    if (session_id >= 0) {
+      // clear just this field so that the clone does not mirror itself, and so
+      // that the digest id sharing the register survives
+      packet_clear_mirror_session(*packet);
+      MirroringSessionConfig config;
+      if (mirroring_session_get(session_id, &config)) {
+        BMLOG_DEBUG_PKT(*packet, "Mirroring packet to port {} (session {})",
+                        config.egress_port, session_id);
+        std::unique_ptr<Packet> packet_copy = packet->clone_with_phv_ptr();
+        packet_copy->set_egress_port(config.egress_port);
+        output_buffer.push_front(std::move(packet_copy));
+      } else {
+        BMLOG_DEBUG_PKT(*packet,
+                        "mirror_packet() selected unconfigured session {};"
+                        " packet not mirrored", session_id);
+      }
+    }
+
     output_buffer.push_front(std::move(packet));
   }
 }

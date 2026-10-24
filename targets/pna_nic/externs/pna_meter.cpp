@@ -1,3 +1,4 @@
+#include <bm/bm_sim/logger.h>
 /* Copyright 2024 Marvell Technology, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -69,6 +70,41 @@ PNA_Meter::execute(const Data &index, Data &value) {
     value.set(pna_color_out);
 }
 
+// PNA colour -> bmv2 colour. The two enumerations disagree in the same way the
+// forward mapping in execute() shows, so this is that switch inverted:
+//   PNA  RED=0, GREEN=1, YELLOW=2   <->   bmv2  GREEN=0, YELLOW=1, RED=2
+// Anything out of range is treated as GREEN, matching how execute() defaults.
+static bm::Meter::color_t
+pna_color_to_bmv2(uint64_t c) {
+  switch (c) {
+    case 0: return 2;  // PNA RED    -> bmv2 RED
+    case 1: return 0;  // PNA GREEN  -> bmv2 GREEN
+    case 2: return 1;  // PNA YELLOW -> bmv2 YELLOW
+    default:
+      bm::Logger::get()->warn(
+          "PNA_Meter: colour {} out of range (0..2); using GREEN", c);
+      return 0;
+  }
+}
+
+void
+PNA_Meter::execute_color(const Data &pre_color, const Data &index,
+                         Data &value) {
+    auto color_out = _meter->execute_meter(
+        get_packet(), index.get<size_t>(),
+        pna_color_to_bmv2(pre_color.get<uint64_t>()));
+
+    // Same bmv2 -> PNA colour translation as execute() above.
+    bm::Meter::color_t pna_color_out = 1;
+    switch (color_out) {
+        case 0 : pna_color_out = 1; break;  // GREEN
+        case 1 : pna_color_out = 2; break;  // YELLOW
+        case 2 : pna_color_out = 0; break;  // RED
+    }
+
+    value.set(pna_color_out);
+}
+
 Meter &
 PNA_Meter::get_meter(size_t idx) {
   return _meter->get_meter(idx);
@@ -86,6 +122,8 @@ PNA_Meter::set_rates(const std::vector<Meter::rate_config_t> &configs) {
 
 BM_REGISTER_EXTERN_W_NAME(Meter, PNA_Meter);
 BM_REGISTER_EXTERN_W_NAME_METHOD(Meter, PNA_Meter, execute, const Data &, Data &);
+BM_REGISTER_EXTERN_W_NAME_METHOD(Meter, PNA_Meter, execute_color,
+                                 const Data &, const Data &, Data &);
 
 }  // namespace bm::pna
 

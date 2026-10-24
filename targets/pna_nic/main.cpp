@@ -23,12 +23,32 @@
 #include <bm/PnaNic.h>
 #include <bm/bm_runtime/bm_runtime.h>
 #include <bm/bm_sim/target_parser.h>
+#include <bm/bm_sim/match_tables.h>
+#include <bm/bm_sim/logger.h>
 
 #include "pna_nic.h"
 
 namespace {
 bm::pna::PnaNic *pna_nic;
 bm::TargetParserBasic *pna_nic_parser;
+
+// PNA numbers the meter colour enumeration RED=0, GREEN=1, YELLOW=2, inverted
+// relative to bmv2's internal GREEN=0, YELLOW=1, RED=2. This is the same
+// mapping PNA_Meter::execute applies at the indirect-meter boundary; a direct
+// meter has no such boundary (the core writes its colour straight into
+// result_target), so the mapping is registered here instead. Keep it in sync
+// with the switch in externs/pna_meter.cpp.
+bm::Meter::color_t pna_direct_meter_color(bm::Meter::color_t c) {
+  switch (c) {
+    case 0: return 1;  // bmv2 GREEN  -> PNA GREEN=1
+    case 1: return 2;  // bmv2 YELLOW -> PNA YELLOW=2
+    case 2: return 0;  // bmv2 RED    -> PNA RED=0
+    default:
+      bm::Logger::get()->warn(
+          "pna_nic: direct-meter colour {} out of range (0..2); using GREEN", c);
+      return 1;  // PNA GREEN
+  }
+}
 }  // namespace
 
 namespace pnic_runtime {
@@ -38,6 +58,9 @@ shared_ptr<PnaNicIf> get_handler(bm::pna::PnaNic *nic);
 int
 main(int argc, char* argv[]) {
   using bm::pna::PnaNic;
+  // Register before any config load or packet processing so every direct
+  // meter's colour is written in PNA's encoding.
+  bm::set_direct_meter_color_translation(&pna_direct_meter_color);
   pna_nic = new PnaNic();
   pna_nic_parser = new bm::TargetParserBasic();
   pna_nic_parser->add_flag_option("enable-swap",

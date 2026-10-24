@@ -22,8 +22,14 @@
 #ifndef PNA_NIC_PNA_COUNTER_H_
 #define PNA_NIC_PNA_COUNTER_H_
 
-#include <bm/bm_sim/extern.h>
+#include <cassert>
+
 #include <bm/bm_sim/counters.h>
+#include <bm/bm_sim/extern.h>
+// init() resolves this counter's array by name through P4Objects, so the type
+// has to be complete here (extern.h only forward-declares it).
+#include <bm/bm_sim/P4Objects.h>
+#include <bm/bm_sim/logger.h>
 
 namespace bm {
 
@@ -39,10 +45,33 @@ class PNA_Counter : public bm::ExternType {
   }
   
   void init() override {
-    _counter = std::unique_ptr<CounterArray>(
-        new CounterArray(get_name() + ".$impl",
-                         spec_id,
-                         n_counters.get<size_t>()));
+    // Adopt the counter array that init_counter_arrays() built from the
+    // program's counter_arrays JSON section, instead of keeping private
+    // storage of our own.
+    //
+    // This matters because that JSON array is the one the control plane reads:
+    // Context::read_counters() resolves the name the controller asked for via
+    // P4Objects::get_counter_array_rt(). An extern-owned array - however
+    // correctly incremented by count() - is invisible to it, so every counter
+    // read reports zero. Owning a duplicate was the original behaviour here
+    // (the array was even named "<name>.$impl", which nothing ever looked up).
+    //
+    // init() runs after init_counter_arrays(), and ExternType documents name
+    // resolution in init() as the intended use of get_p4objects(); see the
+    // comment on _set_p4objects() in bm_sim/extern.h.
+    _counter = get_p4objects().get_counter_array_rt(get_name());
+    if (_counter == nullptr) {
+      BMLOG_ERROR("Counter '{}' is not present in the config's counter_arrays;"
+                  " count() will be a no-op", get_name());
+      return;
+    }
+    // The P4 declaration and the JSON section should agree on the size; if the
+    // JSON is smaller, count() would index past the end.
+    if (n_counters.get<size_t>() > _counter->size()) {
+      BMLOG_ERROR("Counter '{}' declared with {} entries but config allocated"
+                  " {}; count() will ignore larger indices",
+                  get_name(), n_counters.get<size_t>(), _counter->size());
+    }
   }
 
   void count(const Data &index);
@@ -53,12 +82,15 @@ class PNA_Counter : public bm::ExternType {
 
   Counter::CounterErrorCode reset_counters();
 
-  size_t size() const { return _counter->size(); };
+  size_t size() const {
+    return _counter != nullptr ? _counter->size() : 0u;
+  };
 
  private:
   Data n_counters;
   Data type;
-  std::unique_ptr<CounterArray> _counter;
+  // Owned by P4Objects, which outlives the extern instance; see init().
+  CounterArray *_counter{nullptr};
 };
 
 }  // namespace bm::pna

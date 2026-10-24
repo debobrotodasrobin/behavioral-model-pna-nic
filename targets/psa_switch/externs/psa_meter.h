@@ -42,6 +42,14 @@ class PSA_Meter : public bm::ExternType {
 
   void execute(const Data &index, Data &value);
 
+  // Colour-aware meter update, for the two-argument PSA form
+  // execute(index, color). execute() above always meters colour blind; this
+  // takes the packet's existing colour into account as RFC 2698 requires.
+  //
+  // pre_color arrives in PSA's enumeration (RED=0, GREEN=1, YELLOW=2) and is
+  // translated to bmv2's (GREEN=0, YELLOW=1, RED=2) before the meter call.
+  void execute_color(const Data &pre_color, const Data &index, Data &value);
+
   Meter &get_meter(size_t idx);
 
   const Meter &get_meter(size_t idx) const;

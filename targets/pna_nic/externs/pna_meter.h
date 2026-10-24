@@ -43,6 +43,16 @@ class PNA_Meter : public bm::ExternType {
 
   void execute(const Data &index, Data &value);
 
+  // Colour-aware meter update, for the two-argument PNA form
+  // execute(index, color). The existing execute() above always meters as if
+  // the packet had never been coloured (pre-colour GREEN, i.e. colour blind);
+  // RFC 2698 colour-aware metering needs the packet's existing colour to be
+  // taken into account, and there was no way to supply one.
+  //
+  // pre_color arrives in PNA's enumeration (RED=0, GREEN=1, YELLOW=2) and is
+  // translated to bmv2's (GREEN=0, YELLOW=1, RED=2) before the meter call.
+  void execute_color(const Data &pre_color, const Data &index, Data &value);
+
   Meter &get_meter(size_t idx);
 
   const Meter &get_meter(size_t idx) const;

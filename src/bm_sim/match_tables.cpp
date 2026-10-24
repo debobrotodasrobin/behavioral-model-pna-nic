@@ -34,6 +34,14 @@ namespace bm {
 
 namespace {
 
+// See set_direct_meter_color_translation() in match_tables.h. Identity by
+// default, so v1model and any target that never registers a translation are
+// unaffected: the direct-meter write stays exactly target_f.set(color).
+Meter::color_t identity_direct_meter_color(Meter::color_t color) {
+  return color;
+}
+direct_meter_color_fn g_direct_meter_color = &identity_direct_meter_color;
+
 template <typename V>
 std::unique_ptr<MatchUnitAbstract<V> >
 create_match_unit(const std::string match_type, const size_t size,
@@ -63,6 +71,11 @@ create_match_unit(const std::string match_type, const size_t size,
 }
 
 }  // namespace
+
+void
+set_direct_meter_color_translation(direct_meter_color_fn fn) {
+  g_direct_meter_color = (fn != nullptr) ? fn : &identity_direct_meter_color;
+}
 
 void
 ActionEntry::serialize(std::ostream *out) const {
@@ -114,7 +127,11 @@ MatchTableAbstract::apply_action(Packet *pkt) {
     Field &target_f = pkt->get_phv()->get_field(
         meter_target_header, meter_target_offset);
     Meter &meter = match_unit_->get_meter(handle);
-    target_f.set(meter.execute(*pkt));
+    // The colour is translated for the architecture (identity unless the
+    // target registered a hook) because PSA/PNA number the colour enumeration
+    // differently from bmv2 and, unlike an indirect meter extern, a direct
+    // meter has no boundary at which to translate it itself.
+    target_f.set(g_direct_meter_color(meter.execute(*pkt)));
   }
 
   // we're holding the lock for this...
