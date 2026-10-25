@@ -195,3 +195,66 @@ single P4Runtime controller can drive PNA NICs and v1model
   INSERT of an exact-match L2 entry, data-plane forwarding of the installed
   entry, `Read` read-back, and entry persistence across a fresh controller
   session.
+
+## Control-plane API mapping: what P4Runtime covers, what it cannot (2026-10-25)
+
+This section records the spec-conformance reasoning behind the split control
+plane (P4Runtime for the standardized surface, Thrift for the PNA-specific
+residue). It answers two questions directly:
+
+1. **Does the PNA spec require P4Runtime for its externs? No.**
+   `PNA.mdk` mentions P4Runtime exactly once, and only about *type widths*
+   ("the P4 Runtime API may use bit widths independent of the targets…
+   expected to be at least as large as the corresponding `InHeader_t`
+   type"). That is a compatibility note, not a mandate that any extern be
+   programmed via P4Runtime. The spec is deliberately API-neutral: it says
+   the control plane *can* configure certain things (mirror sessions, port
+   classes, idle-timeout profiles) but never names the API.
+
+2. **Does the PNA spec require packet-in/packet-out? No — it is not part of
+   PNA at all.** `packet_in`/`packet_out` appear in the spec only as the
+   *parser/deparser P4 types* (their methods are restricted to those
+   blocks), not as a control-plane API. PNA's host↔NIC model is
+   message-processing blocks (VirtIO/SR-IOV queues), not a CPU port: there
+   is no `send_to_cpu`/`recv_from_cpu` extern in `pna.p4`. The only
+   async data→control channels PNA defines are `Digest<T>` and the
+   `NOTIFY_CONTROL` idle-timeout notification — both delivered here as
+   P4Runtime `StreamMessage`s. Punting a frame to the host is done with
+   `send_to_port()` to a host-class port, not a control-plane `PacketIn`.
+   This is why `pna_nic_grpc` registers the switch with `cpu_port = 0`
+   (packet-in/out disabled): it is spec-correct, not a gap.
+
+### Per-extern control-plane mapping
+
+| Extern / feature | Needs a control-plane API? | P4Runtime schema? | API used here |
+|---|---|---|---|
+| Tables (entries, default action) | Yes | Yes (`Write`/`Read`) | P4Runtime |
+| Counters / direct counters | Yes (read/clear) | Yes (`Read`/`Write`) | P4Runtime |
+| Meters / direct meters | Yes (bands, read) | Yes | P4Runtime |
+| Registers | Yes (read/write) | Yes | P4Runtime |
+| `Digest<T>` | Yes (async data→control) | Yes (`StreamMessage`) | P4Runtime |
+| `pna_idle_timeout = NOTIFY_CONTROL` | Yes (ageing notification) | Yes (`StreamMessage`) | P4Runtime |
+| Mirror sessions (`mirror_packet(session_id)` config) | Yes (spec: "the control plane code can configure…") | Partial — no mirror-session object; PSA targets model it as clone-session `StreamMessage` | Thrift (`bm_mt_clone_session_*`) |
+| `set_port_class` (host vs network port) | Yes | No schema | Thrift (`pna_nic` service) |
+| Expire-time profiles (`pna_idle_timeout` profile map) | Yes | No schema | Thrift (`pna_nic` service) |
+| `add_entry` (add-on-miss) | **No** — spec: "do not require the control plane software to be involved in any way" | n/a | data plane |
+| `pna_idle_timeout = AUTO_DELETE` | **No** — spec: "no notification message is generated to the control plane" | n/a | data plane |
+| `send_to_port` / `drop_packet` / `recirculate` / `mirror_packet` (the call itself) | No — data-plane instructions | n/a | data plane |
+
+Consequences:
+
+- Externs that are table/register/meter/counter/digest-shaped are driven
+  over P4Runtime because P4Runtime happens to have schemas for them — a
+  convenience of the existing API, not a spec requirement.
+- Externs P4Runtime has no schema for (port class, expire-time profiles,
+  mirror-session config) still need *a* control plane; a conformant PNA
+  implementation could legally use P4Runtime vendor extensions, gNMI, or
+  anything else. We expose them over the target's Thrift service, which is
+  started alongside the gRPC server when `--thrift-port` is given.
+- Externs the spec explicitly keeps out of the control plane (`add_entry`,
+  `AUTO_DELETE`) need no API at all — they are pure data plane.
+
+Spec sources: `p4lang/pna` `PNA.mdk` (sections "PNA type definition code
+excerpt", "Data plane vs. control plane data representations",
+"add_entry extern function", "pna_idle_timeout", "mirror_packet") and
+`pna.p4`.
