@@ -75,6 +75,35 @@ bmv2's direct meter writes its colour straight into `result_target` with no targ
 
 No target change needed. bmv2 auto-increments `EntryMeta::counter` on every table hit (`match_units.cpp:795-801`). The p4c fix (emitting `with_counters: true`) is sufficient.
 
+### 10. IdleTimeout ageing externs (add_entry / restart_expire_timer / set_entry_expire_time / allocate_flow_id)
+
+The four PNA IdleTimeout data-path externs plus the `AUTO_DELETE` idle-timeout
+table behaviour that DASH conntrack relies on.
+
+Core (`bm_sim`):
+- `Packet` tracks the table applying an action (`entry_table`) and, for
+  idle-timeout tables, the lookup key captured during lookup (`lookup_key`), so
+  a data-path `add_entry()` re-inserts exactly the key that just missed even if
+  the action mutated the key's header fields first.
+- `MatchTableAbstract` gains an `IdleTimeoutMode` (`NO_TIMEOUT` /
+  `NOTIFY_CONTROL` / `AUTO_DELETE`), `add_entry_from_key()` and
+  `delete_entry_handle()` virtuals, and `build_key()`.
+- `MatchKeyBuilder::key_to_match_params()` rebuilds match-key params from a raw
+  key (EXACT / VALID / LPM / TERNARY).
+- `AgeingMonitor::do_sweep()` deletes expired entries outright in `AUTO_DELETE`
+  mode instead of notifying the control plane.
+- `P4Objects` reads the `pna_idle_timeout` table property and resolves short
+  action names for data-path `add_entry()`.
+
+Target (`externs/pna_idle_timeout.{h,cpp}`): the four primitives plus an
+expire-time-profile map. `add_entry` / `restart_expire_timer` /
+`set_entry_expire_time` defer their table mutation to a post-pipeline flush
+(`flush_pending_add_entry()`, called from `PnaNic::main_thread` after the
+pipeline) because `apply_action()` holds the table's read lock for the whole
+action and `boost::shared_mutex` is non-recursive — a synchronous write lock
+there self-deadlocks. Profile 0 ("expire now") arms a 1 ms timeout (bmv2 treats
+`timeout_ms == 0` as "ageing disarmed").
+
 ## Packet register layout
 
 | Register | Purpose |
@@ -92,6 +121,9 @@ Register 2 is bit-packed (bmv2 convention). ALL reads/writes go through masked a
 |---|---|
 | `set_port_class(port, is_host)` | Configure port as host or network |
 | `get_port_class(port)` | Query port classification |
+| `set_expire_time_profile(profile_id, timeout_ms)` | Configure an expire-time profile |
+| `clear_expire_time_profile(profile_id)` | Remove an expire-time profile |
+| `get_expire_time_profile(profile_id)` | Query a profile's timeout |
 
 ## Build
 
@@ -102,4 +134,6 @@ cd behavioral-model
 
 ## Testing
 
-12 feature suites + Mininet NIC+fabric demo (6/6) + compiler A/B (287 programs, 0 semantic diffs).
+13 feature suites (incl. `ft_ageing.sh`) + Mininet NIC+fabric demo (6/6) +
+compiler A/B (PNA corpus, identical compilable set) + DASH conntrack
+(`-DPNA_CONNTRACK`) compiles and loads in `pna_nic`.
