@@ -137,3 +137,27 @@ cd behavioral-model
 13 feature suites (incl. `ft_ageing.sh`) + Mininet NIC+fabric demo (6/6) +
 compiler A/B (PNA corpus, identical compilable set) + DASH conntrack
 (`-DPNA_CONNTRACK`) compiles and loads in `pna_nic`.
+
+## Spec-conformance audit (2026-10-25)
+
+Every extern, table property, type and metadata field in the authoritative PNA
+spec (`p4lang/pna`) was checked against this target, the p4c PNA backend, and
+the `bmv2/pna.p4` header. Outcomes:
+
+- **NOTIFY_CONTROL idle timeout** is now runtime-verified (`ft_notify.sh`): an
+  expired entry survives (not deleted) and an ageing notification fires on the
+  nanomsg socket. Previously only AUTO_DELETE was exercised.
+- The three "no-if-in-action" wrappers (`add_entry_if`,
+  `set_entry_expire_time_if`, `update_expire_info`) were **removed** from
+  `bmv2/pna.p4` (p4c repo). They were declared but never functional (they crash
+  p4c) and are pure sugar for a guarded base-extern call; this target supports
+  `if`-in-action, so the guarded form is the supported path.
+- `add_on_miss` and `pna_empty_group_action` table properties are now accepted
+  by the compiler (p4c repo). `add_on_miss` is emitted in the table JSON; the
+  `add_entry` primitive already enforces the spec's miss-only semantics.
+  `pna_empty_group_action` is an accepted no-op (bmv2's indirect-table apply path
+  has no empty-group hook; the property is optional and not in canonical pna.p4).
+- Type widths and metadata struct fields match the canonical spec exactly; the
+  extern surface is identical except for the target-specific `recirculate`.
+
+14 feature suites now pass (the 13 above plus `ft_notify.sh`).
