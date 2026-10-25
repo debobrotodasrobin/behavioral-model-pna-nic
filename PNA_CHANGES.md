@@ -161,3 +161,37 @@ the `bmv2/pna.p4` header. Outcomes:
   extern surface is identical except for the target-specific `recirculate`.
 
 14 feature suites now pass (the 13 above plus `ft_notify.sh`).
+
+## P4Runtime support: the `pna_nic_grpc` target (2026-10-25)
+
+`targets/pna_nic_grpc/` adds a P4Runtime gRPC server for the PNA NIC, so a
+single P4Runtime controller can drive PNA NICs and v1model
+`simple_switch_grpc` switches with the same API.
+
+- `PnaNicGrpcRunner` wires `PnaNic` into the PI bridge
+  (`bm::pi::register_switch(pna_nic.get(), 0)`; cpu_port 0 disables
+  packet-in/out since PNA has no CPU port) and serves P4Runtime via
+  `PIGrpcServerInit/RunV2/Wait/Shutdown/Cleanup`, mirroring
+  `simple_switch_grpc` minus the gnmi/gNOPI/sysrepo/DataplaneInterface
+  services.
+- `NotificationsCapture` subscribes to the target's nanomsg notifications
+  (LEA/AGE/SWP) and forwards them as P4Runtime `StreamMessage`s (digest /
+  idle-timeout / port status), same as `simple_switch_grpc`.
+- The target-specific Thrift service (`pna_nic`: port class, expire-time
+  profiles) is still started when `--thrift-port` is given — those PNA
+  externs have no P4Runtime equivalent.
+- Link note: bmv2's PI bridge `dynamic_cast`s to `SimpleSwitch`
+  (`pi_clone_imp.cpp`), so this target links `libsimpleswitch.la` and pins
+  the needed members with a `typeid` anchor in `switch_runner.cpp`.
+- Build: configured automatically with `--with-pi`
+  (`AC_CONFIG_SUBDIRS([targets/pna_nic_grpc])`).
+- Usage: `pna_nic_grpc -i 1@eth0 ... <json> -- --grpc-server-addr 0.0.0.0:9559`
+  (target options go after `--`, like `simple_switch_grpc`).
+- P4Info comes from p4c: `p4c-bm2-pna --p4runtime-files prog.p4info.txt ...`
+  (works today; the emitted `pkg_info.arch` string says "v1model", which is
+  cosmetic and ignored by the server).
+- Verified end-to-end (`ft_pnic_grpc.sh` in the p4Test workspace):
+  arbitration, `SetForwardingPipelineConfig` (VERIFY_AND_COMMIT), `Write`
+  INSERT of an exact-match L2 entry, data-plane forwarding of the installed
+  entry, `Read` read-back, and entry persistence across a fresh controller
+  session.
