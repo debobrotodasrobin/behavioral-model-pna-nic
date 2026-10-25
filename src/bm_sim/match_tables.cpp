@@ -121,6 +121,20 @@ MatchTableAbstract::apply_action(Packet *pkt) {
   // of direct-like extern instances.
   pkt->set_entry_index(
       hit ? (handle & 0x00ffffff) : Packet::INVALID_ENTRY_INDEX);
+  // The PNA ageing externs operate on the table whose action is running:
+  // restart_expire_timer / set_entry_expire_time act on the matched entry
+  // (hit, so get_entry_index() is valid), while add_entry re-inserts the key
+  // that just missed (miss). Record the table on both hit and miss so the
+  // miss action can find it too.
+  pkt->set_entry_table(this);
+  // For idle-timeout tables, capture the key lookup computed for this packet
+  // so add_entry() can re-insert exactly it, even if the action modifies the
+  // header fields the key is built from before calling add_entry.
+  if (idle_timeout_enabled) {
+    ByteContainer key;
+    match_unit_->build_key(*pkt->get_phv(), &key);
+    pkt->set_lookup_key(key);
+  }
 
   if (hit && with_meters) {
     // we only execute the direct meter if hit, should we have a miss meter?
@@ -321,6 +335,48 @@ MatchTableAbstract::set_entry_ttl(entry_handle_t handle, unsigned int ttl_ms) {
   return match_unit_->set_entry_ttl(handle, ttl_ms);
 }
 
+bool
+MatchTableAbstract::get_entry_ttl(entry_handle_t handle,
+                                  uint32_t *timeout_ms,
+                                  uint32_t *time_since_hit_ms) const {
+  if (!with_ageing) return false;
+  auto lock = lock_read();
+  if (!is_valid_handle(handle)) return false;
+  using std::chrono::duration_cast;
+  using std::chrono::milliseconds;
+  auto tp = Packet::clock::now();
+  auto now_ms = duration_cast<milliseconds>(tp.time_since_epoch()).count();
+  const MatchUnit::EntryMeta &meta = match_unit_->get_entry_meta(handle);
+  *timeout_ms = meta.timeout_ms;
+  *time_since_hit_ms = static_cast<uint32_t>(now_ms - meta.ts.get_ms());
+  return true;
+}
+
+void
+MatchTableAbstract::build_key(const PHV &phv, ByteContainer *key) const {
+  auto lock = lock_read();
+  match_unit_->build_key(phv, key);
+}
+
+MatchErrorCode
+MatchTableAbstract::add_entry_from_key(const ByteContainer &,
+                                       const ActionFn *,
+                                       ActionData,
+                                       entry_handle_t *,
+                                       uint32_t) {
+  // Only direct match tables support data-path-initiated insert (PNA
+  // add_entry). Indirect tables bind to a member/group handle, not an action,
+  // so the generic entry-based insert does not apply.
+  return MatchErrorCode::WRONG_TABLE_TYPE;
+}
+
+MatchErrorCode
+MatchTableAbstract::delete_entry_handle(entry_handle_t) {
+  // Overridden by every concrete table type; reaching this means a new table
+  // type was added without wiring up the ageing AUTO_DELETE path.
+  return MatchErrorCode::ERROR;
+}
+
 void
 MatchTableAbstract::sweep_entries(std::vector<entry_handle_t> *entries) const {
   auto lock = lock_read();  // TODO(antonin): how to avoid this?
@@ -435,6 +491,28 @@ MatchTable::add_entry(const std::vector<MatchKeyParam> &match_key,
                 get_name(), match_error_code_to_string(rc));
   }
 
+  return rc;
+}
+
+MatchErrorCode
+MatchTable::add_entry_from_key(const ByteContainer &key,
+                               const ActionFn *action_fn,
+                               ActionData action_data,
+                               entry_handle_t *handle,
+                               uint32_t timeout_ms) {
+  // Rebuild the control-plane-style match-key parameters from the raw key the
+  // PNA add_entry extern captured (the key that just missed), then reuse the
+  // regular add_entry path so versioning, priority and duplicate handling all
+  // behave exactly as for a control-plane insert.
+  std::vector<MatchKeyParam> match_key;
+  if (!match_unit->get_key_builder().key_to_match_params(key, &match_key))
+    return MatchErrorCode::BAD_MATCH_KEY;
+
+  auto rc = add_entry(match_key, action_fn, std::move(action_data), handle);
+  // Arm the idle timer so the entry ages out (or notifies) like one inserted
+  // with an explicit timeout. timeout_ms == 0 leaves ageing disarmed.
+  if (rc == MatchErrorCode::SUCCESS && timeout_ms > 0)
+    set_entry_ttl(*handle, timeout_ms);
   return rc;
 }
 

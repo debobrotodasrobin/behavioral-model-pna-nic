@@ -197,7 +197,61 @@ class MatchTableAbstract : public NamedP4Object {
 
   MatchErrorCode set_entry_ttl(entry_handle_t handle, unsigned int ttl_ms);
 
+  //! Reads the entry's current idle timeout and how long it has been since
+  //! the entry was last hit, both in milliseconds. Unlike the EntryCommon
+  //! accessors this works for every table type and does not require the
+  //! caller to know the entry layout; it is used by the PNA ageing externs
+  //! (set_entry_expire_time needs the current timeout to tell an explicit
+  //! profile timeout of 0 apart from "this table has no ageing").
+  //! Returns false if the table does not support ageing or the handle is
+  //! invalid.
+  bool get_entry_ttl(entry_handle_t handle, uint32_t *timeout_ms,
+                     uint32_t *time_since_hit_ms) const;
+
   void sweep_entries(std::vector<entry_handle_t> *entries) const;
+
+  //! What the ageing monitor does when an entry of this table expires. PNA
+  //! lets a table opt into one of two behaviours via the pna_idle_timeout
+  //! property; bmv2's historical behaviour (v1model support_timeout) is to
+  //! notify the control plane, which maps to NOTIFY_CONTROL.
+  enum class IdleTimeoutMode {
+    NO_TIMEOUT,     //!< ageing disabled for this table
+    NOTIFY_CONTROL, //!< emit an idle-timeout notification, keep the entry
+    AUTO_DELETE,    //!< remove the entry when its idle timer expires
+  };
+
+  //! Called by P4Objects when loading the JSON. Any mode other than
+  //! NO_TIMEOUT also requires with_ageing to be set (so the table is
+  //! registered with the ageing monitor); P4Objects guarantees that.
+  void set_idle_timeout(IdleTimeoutMode mode) {
+    idle_timeout_mode = mode;
+    idle_timeout_enabled = (mode != IdleTimeoutMode::NO_TIMEOUT);
+  }
+  bool has_idle_timeout() const { return idle_timeout_enabled; }
+  IdleTimeoutMode get_idle_timeout_mode() const { return idle_timeout_mode; }
+
+  //! Rebuilds this table's match key from the packet's PHV. Used by the PNA
+  //! add_entry extern to recover the key that just missed. Delegates to the
+  //! table's own MatchKeyBuilder, so it produces exactly the bytes lookup()
+  //! would have compared against.
+  void build_key(const PHV &phv, ByteContainer *key) const;
+
+  //! Data-path-initiated insert used by the PNA add_entry extern: adds an
+  //! entry for an already-built raw match key (the key that just missed),
+  //! bound to \p action_fn / \p action_data, and arms its idle timer with
+  //! \p timeout_ms (0 leaves the timer disarmed). The default implementation
+  //! rejects the request; only direct match tables (PNA add_entry targets)
+  //! override it.
+  virtual MatchErrorCode add_entry_from_key(const ByteContainer &key,
+                                            const ActionFn *action_fn,
+                                            ActionData action_data,
+                                            entry_handle_t *handle,
+                                            uint32_t timeout_ms);
+
+  //! Deletes the entry identified by \p handle. Virtual so the ageing monitor
+  //! can delete an expired entry without knowing the concrete table type
+  //! (AUTO_DELETE). The default implementation rejects the request.
+  virtual MatchErrorCode delete_entry_handle(entry_handle_t handle);
 
   handle_iterator handles_begin() const;
   handle_iterator handles_end() const;
@@ -236,6 +290,11 @@ class MatchTableAbstract : public NamedP4Object {
   std::atomic_bool with_counters{false};
   std::atomic_bool with_meters{false};
   std::atomic_bool with_ageing{false};
+
+  // PNA idle timeout: the action the ageing monitor takes on expiry. Only
+  // meaningful when with_ageing is also set. See set_idle_timeout().
+  bool idle_timeout_enabled{false};
+  IdleTimeoutMode idle_timeout_mode{IdleTimeoutMode::NO_TIMEOUT};
 
   std::unordered_map<p4object_id_t, const ControlFlowNode *> next_nodes{};
   const ControlFlowNode *next_node_hit{nullptr};
@@ -324,6 +383,18 @@ class MatchTable : public MatchTableAbstract {
                            int priority = -1);
 
   MatchErrorCode delete_entry(entry_handle_t handle);
+
+  // PNA add_entry extern: insert from a raw (already-built) match key.
+  MatchErrorCode add_entry_from_key(const ByteContainer &key,
+                                    const ActionFn *action_fn,
+                                    ActionData action_data,
+                                    entry_handle_t *handle,
+                                    uint32_t timeout_ms) override;
+
+  // Ageing monitor AUTO_DELETE path.
+  MatchErrorCode delete_entry_handle(entry_handle_t handle) override {
+    return delete_entry(handle);
+  }
 
   MatchErrorCode modify_entry(entry_handle_t handle,
                               const ActionFn *action_fn,
@@ -422,6 +493,11 @@ class MatchTableIndirect : public MatchTableAbstract {
                            int priority = -1);
 
   MatchErrorCode delete_entry(entry_handle_t handle);
+
+  // Ageing monitor AUTO_DELETE path (inherited by MatchTableIndirectWS).
+  MatchErrorCode delete_entry_handle(entry_handle_t handle) override {
+    return delete_entry(handle);
+  }
 
   MatchErrorCode modify_entry(entry_handle_t handle, mbr_hdl_t mbr);
 

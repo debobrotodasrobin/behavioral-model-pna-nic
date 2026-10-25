@@ -33,6 +33,7 @@ namespace thrift_provider = apache::thrift;
 #include <bm/thrift/stdcxx.h>
 
 #include "pna_nic.h"
+#include "externs/pna_idle_timeout.h"
 
 using namespace bm::pna;
 
@@ -90,6 +91,31 @@ class PnaNicHandler : virtual public PnaNicIf {
   int32_t get_port_class(const int32_t port) {
     bm::Logger::get()->trace("get_port_class");
     return port_class_is_host(static_cast<bm::port_t>(port)) ? 1 : 0;
+  }
+
+  // Expire-time profiles for the PNA IdleTimeout externs. See the RPC comments
+  // in pna_nic.thrift and the contract in externs/pna_idle_timeout.h. Profile
+  // id 0 ("expire now") is reserved and handled in the data path.
+  void set_expire_time_profile(const int32_t profile_id,
+                               const int32_t timeout_ms) {
+    bm::Logger::get()->trace("set_expire_time_profile");
+    bm::pna::set_expire_time_profile(static_cast<uint8_t>(profile_id),
+                                     static_cast<uint32_t>(timeout_ms));
+  }
+
+  void clear_expire_time_profile(const int32_t profile_id) {
+    bm::Logger::get()->trace("clear_expire_time_profile");
+    bm::pna::clear_expire_time_profile(static_cast<uint8_t>(profile_id));
+  }
+
+  int32_t get_expire_time_profile(const int32_t profile_id) {
+    bm::Logger::get()->trace("get_expire_time_profile");
+    uint32_t timeout_ms = 0;
+    if (!bm::pna::get_expire_time_profile(static_cast<uint8_t>(profile_id),
+                                          &timeout_ms)) {
+      return -1;
+    }
+    return static_cast<int32_t>(timeout_ms);
   }
 
  private:

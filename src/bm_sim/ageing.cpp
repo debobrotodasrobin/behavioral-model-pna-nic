@@ -22,6 +22,7 @@
 #include <bm/bm_sim/match_tables.h>
 #include <bm/bm_sim/packet.h>
 #include <bm/bm_sim/logger.h>
+#include <bm/bm_sim/match_error_codes.h>
 
 #include <string>
 #include <thread>
@@ -170,10 +171,32 @@ void
 AgeingMonitor::do_sweep() {
   for (auto &entry : tables_with_ageing) {
     TableData &data = entry.second;
-    const MatchTableAbstract *t = data.table;
+    MatchTableAbstract *t = data.table;
     auto &prev_sweep_entries = data.prev_sweep_entries;
     t->sweep_entries(&entries_tmp);
     if (entries_tmp.empty()) {
+      prev_sweep_entries.clear();
+      continue;
+    }
+
+    // PNA AUTO_DELETE idle timeout: remove the expired entries outright
+    // instead of notifying the control plane. No notification is emitted and
+    // no prev-sweep bookkeeping is kept, because the entries cease to exist
+    // (their handles are recycled by the table, so remembering them would be
+    // wrong). This is what DASH conntrack relies on to age flows out.
+    if (t->get_idle_timeout_mode() ==
+        MatchTableAbstract::IdleTimeoutMode::AUTO_DELETE) {
+      for (entry_handle_t handle : entries_tmp) {
+        const auto rc = t->delete_entry_handle(handle);
+        if (rc != MatchErrorCode::SUCCESS) {
+          BMLOG_ERROR("Ageing AUTO_DELETE failed for entry {} in table '{}': {}",
+                      handle, t->get_name(), match_error_code_to_string(rc));
+        } else {
+          BMLOG_TRACE("Ageing AUTO_DELETE entry {} in table '{}'",
+                      handle, t->get_name());
+        }
+      }
+      entries_tmp.clear();
       prev_sweep_entries.clear();
       continue;
     }

@@ -231,6 +231,59 @@ MatchKeyBuilder::key_to_fields(const ByteContainer &key) const {
   return fields;
 }
 
+bool
+MatchKeyBuilder::key_to_match_params(const ByteContainer &key,
+                                     std::vector<MatchKeyParam> *params) const {
+  if (!built) return false;
+  if (key.size() != nbytes_key) return false;
+  params->clear();
+
+  const size_t nfields = key_mapping.size();
+  for (size_t i = 0; i < nfields; i++) {
+    const size_t imp_idx = key_mapping.at(i);
+    const auto &f_info = key_input.at(imp_idx);
+    const size_t byte_offset = key_offsets.at(i);
+    const size_t f_nbytes = nbits_to_nbytes(f_info.nbits);
+    auto start = key.begin() + byte_offset;
+    std::string val(start, start + f_nbytes);
+
+    using Type = MatchKeyParam::Type;
+    switch (f_info.mtype) {
+      case Type::EXACT:
+        params->emplace_back(Type::EXACT, std::move(val));
+        break;
+      case Type::VALID:
+        params->emplace_back(Type::VALID, std::move(val));
+        break;
+      case Type::LPM: {
+        // The raw key already stores value & mask, which is exactly what
+        // match_params_to_entry re-derives, so re-inserting is idempotent.
+        // Recover the prefix length from the (contiguous) field mask.
+        const ByteContainer &mask = masks.at(i);
+        int prefix_length = 0;
+        for (char c : mask)
+          for (int b = 7; b >= 0; b--) {
+            if ((static_cast<unsigned char>(c) >> b) & 1) prefix_length++;
+            else b = -1;  // first zero ends a contiguous LPM mask
+          }
+        params->emplace_back(Type::LPM, std::move(val), prefix_length);
+        break;
+      }
+      case Type::TERNARY: {
+        const ByteContainer &mask = masks.at(i);
+        params->emplace_back(Type::TERNARY, std::move(val),
+                             std::string(mask.begin(), mask.end()));
+        break;
+      }
+      case Type::RANGE:
+        // A RANGE key stores only its start bound in the masked key; the end
+        // bound is unrecoverable, so add_entry cannot rebuild it.
+        return false;
+    }
+  }
+  return true;
+}
+
 // TODO(antonin): re-use above function instead?
 std::string
 MatchKeyBuilder::key_to_string(const ByteContainer &key, std::string separator,

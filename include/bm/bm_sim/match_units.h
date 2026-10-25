@@ -106,6 +106,16 @@ class MatchKeyBuilder {
 
   std::vector<std::string> key_to_fields(const ByteContainer &key) const;
 
+  //! Reconstructs a match-key parameter vector from a raw key built by
+  //! operator(), i.e. the inverse of match_params_to_entry for the common
+  //! match types. Used by the PNA add_entry extern, which captures the key
+  //! that just missed (as raw bytes) and must hand the control-plane-style
+  //! parameter form back to MatchTable::add_entry. Supports EXACT, VALID, LPM
+  //! and TERNARY; returns false for RANGE keys (whose start/end bounds cannot
+  //! be recovered from the masked key) and for a key of the wrong length.
+  bool key_to_match_params(const ByteContainer &key,
+                           std::vector<MatchKeyParam> *params) const;
+
   std::string key_to_string(const ByteContainer &key,
                             std::string separator = "",
                             bool upper_case = false) const;
@@ -314,10 +324,18 @@ class MatchUnitAbstract_ {
   MatchErrorCode unset_handle(internal_handle_t handle);
   bool valid_handle_(internal_handle_t handle) const;
 
+ public:
+  // Public because MatchTableAbstract::build_key (used by the PNA add_entry
+  // extern) needs to rebuild a key from the PHV and is not a friend.
   void build_key(const PHV &phv, ByteContainer *key) const {
     match_key_builder(phv, key);
   }
 
+  //! Access to the key builder (e.g. to turn a raw key back into match-key
+  //! parameters for the PNA add_entry extern).
+  const MatchKeyBuilder &get_key_builder() const { return match_key_builder; }
+
+ protected:
   std::string key_to_string(const ByteContainer &key) const {
     return match_key_builder.key_to_string(key);
   }

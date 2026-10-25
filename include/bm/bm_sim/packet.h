@@ -40,6 +40,13 @@
 #include "parser_error.h"
 #include "phv_source.h"
 #include "phv_forward.h"
+#include "bytecontainer.h"
+
+namespace bm {
+
+class MatchTableAbstract;
+
+}  // namespace bm
 
 namespace bm {
 
@@ -236,6 +243,31 @@ class Packet final {
   //! Packet::INVALID_ENTRY_INDEX if lookup was a miss.
   size_t get_entry_index() const { return entry_index; }
 
+  //! The table whose action is currently executing (hit or miss). Set by
+  //! MatchTableAbstract::apply_action before the action runs, so the PNA
+  //! ageing externs can find the table they operate on:
+  //!   - restart_expire_timer / set_entry_expire_time use it together with
+  //!     get_entry_index() to locate the entry whose timer to touch (only
+  //!     meaningful on a hit, i.e. when get_entry_index() is valid).
+  //!   - add_entry inserts into this table the key that just missed.
+  //! The pointer is to a config-time object that outlives the packet, so it
+  //! is safe to hold for the packet's lifetime. nullptr before the first
+  //! table application.
+  void set_entry_table(const MatchTableAbstract *table) {
+    entry_table = const_cast<MatchTableAbstract *>(table);
+  }
+  MatchTableAbstract *get_entry_table() const { return entry_table; }
+
+  //! The match key that the current table computed for this packet during
+  //! lookup, captured by MatchTableAbstract::apply_action for tables that
+  //! have a PNA idle timeout enabled. add_entry() re-inserts exactly this
+  //! key (the one that just missed), so it must be the pre-action value: an
+  //! action is free to modify the header fields the key is built from before
+  //! it calls add_entry, and rebuilding from the PHV afterwards would then
+  //! produce a different key.
+  void set_lookup_key(const ByteContainer &key) { lookup_key = key; }
+  const ByteContainer &get_lookup_key() const { return lookup_key; }
+
   void set_error_code(const ErrorCode &code) { error_code = code; }
   //! Get the error code for this Packet, as set by the most recent Parser
   //! object the packet went through. For most packets, this error code should
@@ -380,6 +412,12 @@ class Packet final {
   // Used to store the index of the entry returned by the last match table
   // lookup; INVALID_ENTRY_INDEX if lookup was a miss.
   size_t entry_index{INVALID_ENTRY_INDEX};
+  // the table whose action is currently executing (hit or miss); nullptr
+  // before the first table application. See set_entry_table().
+  MatchTableAbstract *entry_table{nullptr};
+  // the key the current table computed during lookup, captured for PNA idle
+  // timeout tables so add_entry() can re-insert the key that just missed.
+  ByteContainer lookup_key{};
 
   ErrorCode error_code{ErrorCode::make_invalid()};
 

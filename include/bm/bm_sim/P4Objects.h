@@ -156,6 +156,16 @@ class P4Objects {
   ActionFn *get_action_rt(const std::string &table_name,
                           const std::string &action_name) const;
 
+  //! Resolves an action of \p table_name from a possibly-unqualified name, as
+  //! written in a PNA add_entry("action_name", ...) call. bmv2 stores actions
+  //! under their fully-qualified control-plane name (e.g. "MyControl.my_action")
+  //! but the add_entry extern receives the short name the programmer wrote.
+  //! Tries an exact match first (so a caller that already passes the qualified
+  //! name still works), then any action of the table whose qualified name ends
+  //! with ".<short_name>". Returns nullptr if none matches.
+  ActionFn *get_action_rt_by_short_name(const std::string &table_name,
+                                        const std::string &short_name) const;
+
   ActionFn *get_action_for_action_profile_rt(
       const std::string &act_prof_name, const std::string &action_name) const;
 

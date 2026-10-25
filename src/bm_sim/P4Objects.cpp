@@ -1731,11 +1731,19 @@ P4Objects::init_pipelines(const Json::Value &cfg_root,
       const string table_type = cfg_table["type"].asString();
       const int table_size = get_table_size(cfg_table);
       const Json::Value false_value(false);
+      const Json::Value empty_value(std::string(""));
       // if attribute is missing, default is false
       const bool with_counters =
         cfg_table.get("with_counters", false_value).asBool();
+      // PNA idle timeout: p4c emits a "pna_idle_timeout" string property
+      // ("NOTIFY_CONTROL" or "AUTO_DELETE") on tables that declare the
+      // pna_idle_timeout table property. Its presence implies ageing, so OR it
+      // into with_ageing to be robust even if support_timeout was omitted.
+      const std::string pna_idle_timeout_mode =
+        cfg_table.get("pna_idle_timeout", empty_value).asString();
       const bool with_ageing =
-        cfg_table.get("support_timeout", false_value).asBool();
+        cfg_table.get("support_timeout", false_value).asBool()
+        || !pna_idle_timeout_mode.empty();
 
       // TODO(antonin): improve this to make it easier to create new kind of
       // tables e.g. like the register mechanism for primitives :)
@@ -1799,6 +1807,26 @@ P4Objects::init_pipelines(const Json::Value &cfg_root,
       }
 
       if (with_ageing) ageing_monitor->add_table(table->get_match_table());
+
+      // Apply the PNA idle timeout behaviour (notify vs auto-delete). Done
+      // after registration so the ageing monitor sees a fully configured
+      // table. An empty mode leaves the table in bmv2's default
+      // notify-control-plane behaviour.
+      if (!pna_idle_timeout_mode.empty()) {
+        using IdleMode = MatchTableAbstract::IdleTimeoutMode;
+        IdleMode idle_mode;
+        if (pna_idle_timeout_mode == "AUTO_DELETE") {
+          idle_mode = IdleMode::AUTO_DELETE;
+        } else if (pna_idle_timeout_mode == "NOTIFY_CONTROL") {
+          idle_mode = IdleMode::NOTIFY_CONTROL;
+        } else {
+          throw json_exception(
+              EFormat() << "Unknown pna_idle_timeout mode '"
+                        << pna_idle_timeout_mode << "'",
+              cfg_table);
+        }
+        table->get_match_table()->set_idle_timeout(idle_mode);
+      }
 
       add_match_action_table(table_name, std::move(table));
     }
@@ -2596,6 +2624,22 @@ P4Objects::get_action_rt(const std::string &table_name,
                          const std::string &action_name) const {
   auto it = t_actions_map.find(std::make_pair(table_name, action_name));
   return (it != t_actions_map.end()) ? it->second : nullptr;
+}
+
+ActionFn *
+P4Objects::get_action_rt_by_short_name(const std::string &table_name,
+                                       const std::string &short_name) const {
+  // exact match first (handles callers that already pass the qualified name)
+  if (auto *exact = get_action_rt(table_name, short_name)) return exact;
+  const std::string suffix = "." + short_name;
+  for (const auto &kv : t_actions_map) {
+    if (kv.first.first != table_name) continue;
+    const std::string &aname = kv.first.second;
+    if (aname.size() > suffix.size() &&
+        aname.compare(aname.size() - suffix.size(), suffix.size(), suffix) == 0)
+      return kv.second;
+  }
+  return nullptr;
 }
 
 ActionFn *

@@ -52,4 +52,15 @@ service PnaNic {
   void set_port_class(1:i32 port, 2:bool is_host);
   i32 get_port_class(1:i32 port);
 
+  // Expire-time profiles, backing the PNA IdleTimeout externs
+  // (add_entry / set_entry_expire_time). A profile maps an 8-bit id to a
+  // duration in milliseconds; the data path resolves the id carried by those
+  // externs to a timeout through this table. Profile id 0 is reserved by PNA
+  // to mean "expire now" and is handled in the data path, so configuring it
+  // here has no effect. get_expire_time_profile returns the configured
+  // duration, or -1 if the profile has never been set.
+  void set_expire_time_profile(1:i32 profile_id, 2:i32 timeout_ms);
+  void clear_expire_time_profile(1:i32 profile_id);
+  i32 get_expire_time_profile(1:i32 profile_id);
+
 }

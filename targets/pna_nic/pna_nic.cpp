@@ -30,6 +30,7 @@
 
 #include <bm/bm_sim/learning.h>
 #include "pna_nic.h"
+#include "externs/pna_idle_timeout.h"
 
 extern int import_primitives();
 extern int import_counters();
@@ -268,6 +269,15 @@ PnaNic::main_thread() {
     Pipeline *main_mau = this->get_pipeline("main_control");
     main_mau->apply(packet.get());
     packet->reset_exit();
+
+    // A data-path add_entry() cannot insert while apply_action() holds the
+    // table's lock, so the primitive queued the request instead; perform the
+    // inserts now that the pipeline has returned and released every lock. This
+    // runs before the drop / recirculate handling so an entry learned by a
+    // packet that is subsequently dropped or recirculated is still installed,
+    // matching the PNA semantics that add_entry() is a side effect independent
+    // of the packet's fate.
+    bm::pna::flush_pending_add_entry();
 
     // Digest<T>::pack() leaves the field list it wants reported in the mirror
     // register. Emitting it here, before the drop and recirculate handling,
